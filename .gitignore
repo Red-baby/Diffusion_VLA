@@ -1,0 +1,125 @@
+########################################
+# OS / Editors
+########################################
+.DS_Store
+Thumbs.db
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+########################################
+# Python
+########################################
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.coverage
+htmlcov/
+.cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+########################################
+# Virtual envs
+########################################
+venv/
+.venv/
+env/
+ENV/
+pythonenv*/
+# if you keep a venv under project
+venv_rlbench/
+
+########################################
+# PyTorch / TorchVision caches
+########################################
+# default torch hub cache (often under /root/.cache/torch but keep generic)
+**/torch_cache/
+**/.cache/torch/
+**/hub/checkpoints/
+*.pth
+*.pt
+*.ckpt
+
+########################################
+# RLBench / CoppeliaSim / PyRep runtime artifacts
+########################################
+# CoppeliaSim may drop logs / temp / dumps
+*.log
+*.out
+*.err
+core
+core.*
+*.dmp
+
+# Xvfb / Qt / OpenGL can emit random files
+Xauthority
+.xvfb-run.*
+*.qmlc
+*.jsc
+
+########################################
+# Project-specific: datasets, rollouts, recordings
+########################################
+# Demos / datasets (can be huge)
+data/
+datasets/
+rollouts/
+records/
+recordings/
+
+# If you want to keep only meta files under data/, use the "allowlist" below.
+# data/**
+# !data/**/meta.json
+# !data/**/README.md
+
+# Numpy arrays / serialized data
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.hdf5
+*.h5
+*.tfrecord*
+*.jsonl
+
+########################################
+# Training runs / outputs
+########################################
+runs/
+checkpoints/
+logs/
+wandb/
+tensorboard/
+tb_logs/
+lightning_logs/
+
+########################################
+# Docker / Local scripts / secrets
+########################################
+# env scripts may contain paths/tokens; keep a template tracked instead
+rlbench_env.sh
+*.env
+.env.*
+secrets.*
+*token*
+*apikey*
+*.key
+
+# Optional: keep templates (tracked)
+!rlbench_env.sh.template
+!.env.template
