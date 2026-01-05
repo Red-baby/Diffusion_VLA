@@ -108,22 +108,46 @@ def clip_axis_angle(aa: np.ndarray, max_angle: float) -> np.ndarray:
 
 
 class DeltaPoseBC(nn.Module):
-    def __init__(self, out_dim: int, use_pretrained: bool):
+    def __init__(self, out_dim: int, state_dim: int, use_state: bool, use_pretrained: bool):
         super().__init__()
+        self.use_state = use_state
+
         if use_pretrained:
             backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
         else:
             backbone = models.resnet18(weights=None)
         self.encoder = nn.Sequential(*list(backbone.children())[:-1])
+
+        if self.use_state:
+            self.state_mlp = nn.Sequential(
+                nn.Linear(state_dim, 64),
+                nn.ReLU(inplace=True),
+                nn.Linear(64, 64),
+                nn.ReLU(inplace=True),
+            )
+            head_in = 512 + 64
+        else:
+            head_in = 512
+
         self.head = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(512, 256),
+            nn.Linear(head_in, 256),
             nn.ReLU(inplace=True),
             nn.Linear(256, out_dim),
         )
 
-    def forward(self, x):
-        return self.head(self.encoder(x))
+    def forward(self, x, state=None):
+        img_feat = self.encoder(x)
+        img_feat = torch.flatten(img_feat, 1)
+
+        if self.use_state:
+            if state is None:
+                raise ValueError("State input is required when use_state=True")
+            state_feat = self.state_mlp(state)
+            feat = torch.cat([img_feat, state_feat], dim=1)
+        else:
+            feat = img_feat
+
+        return self.head(feat)
 
 
 def main():
@@ -137,9 +161,36 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("[eval] device:", device)
 
-    # safer load (avoid warning)
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    model = DeltaPoseBC(out_dim=cfg.target_dim, use_pretrained=cfg.use_pretrained)
+    ckpt_cfg = ckpt.get("cfg", {})
+    target_dim = int(ckpt_cfg.get("target_dim", cfg.target_dim))
+    use_state = bool(ckpt_cfg.get("use_state", cfg.use_state))
+    state_dim = int(ckpt_cfg.get("state_dim", cfg.state_dim))
+    normalize_state = bool(ckpt_cfg.get("normalize_state", cfg.normalize_state))
+    demo_stride = max(int(ckpt_cfg.get("demo_stride", cfg.demo_stride)), 1)
+    image_key = ckpt_cfg.get("image_key", cfg.image_key)
+    img_w = int(ckpt_cfg.get("img_w", cfg.img_w))
+    img_h = int(ckpt_cfg.get("img_h", cfg.img_h))
+    max_delta_xyz = float(ckpt_cfg.get("max_delta_xyz", cfg.max_delta_xyz))
+    max_delta_angle = float(ckpt_cfg.get("max_delta_angle", cfg.max_delta_angle))
+    gripper_threshold = float(ckpt_cfg.get("gripper_threshold", cfg.gripper_threshold))
+
+    state_mean = ckpt.get("state_mean")
+    state_std = ckpt.get("state_std")
+    if state_mean is not None:
+        state_mean = np.array(state_mean, dtype=np.float32)
+    if state_std is not None:
+        state_std = np.array(state_std, dtype=np.float32)
+    if not normalize_state:
+        state_mean = None
+        state_std = None
+
+    model = DeltaPoseBC(
+        out_dim=target_dim,
+        state_dim=state_dim,
+        use_state=use_state,
+        use_pretrained=cfg.use_pretrained,
+    )
     model.load_state_dict(ckpt["model"])
     model.to(device)
     model.eval()
@@ -154,7 +205,7 @@ def main():
         arm_action_mode=EndEffectorPoseViaIK(),
         gripper_action_mode=Discrete()
     )
-    obs_config = make_obs_config(cfg.image_key)
+    obs_config = make_obs_config(image_key)
 
     env = Environment(action_mode, obs_config=obs_config, headless=cfg.headless)
     env.launch()
@@ -171,31 +222,43 @@ def main():
         done = False
 
         for _t in range(cfg.max_steps):
-            img = getattr(obs, cfg.image_key)
-            img = resize_rgb(img, cfg.img_w, cfg.img_h)
+            img = getattr(obs, image_key)
+            img = resize_rgb(img, img_w, img_h)
             if cfg.occlusion:
                 img = occlude_center(img, cfg.occ_half)
 
             x = tf(img).unsqueeze(0).to(device, non_blocking=True)
+
+            pose7 = np.array(obs.gripper_pose, dtype=np.float32)  # [x,y,z,qx,qy,qz,qw]
+            curr_xyz = pose7[:3]
+            curr_q = quat_normalize(pose7[3:7])
+
+            if use_state:
+                curr_open = float(obs.gripper_open)
+                state = np.concatenate([pose7, np.array([curr_open], dtype=np.float32)], axis=0)
+                if state_mean is not None:
+                    state = (state - state_mean) / state_std
+                s = torch.from_numpy(state).unsqueeze(0).to(device, non_blocking=True)
+            else:
+                s = None
+
             with torch.no_grad():
-                pred = model(x).squeeze(0)  # (7,)
+                pred = model(x, s).squeeze(0)  # (7,)
 
             pred = pred.detach().cpu().numpy().astype(np.float32)
 
             # Parse outputs
             pred_delta = np.tanh(pred[:6]).astype(np.float32)
-            delta_xyz = pred_delta[:3] * cfg.max_delta_xyz
-            delta_aa = pred_delta[3:6] * cfg.max_delta_angle
+            delta_xyz = pred_delta[:3] * max_delta_xyz
+            delta_aa = pred_delta[3:6] * max_delta_angle
+            if demo_stride > 1:
+                delta_xyz = delta_xyz / float(demo_stride)
+                delta_aa = delta_aa / float(demo_stride)
             g_logit = pred[6]
 
             # Constrain step sizes
-            delta_xyz = np.clip(delta_xyz, -cfg.max_delta_xyz, cfg.max_delta_xyz).astype(np.float32)
-            delta_aa = clip_axis_angle(delta_aa, cfg.max_delta_angle)
-
-            # Current pose
-            pose7 = np.array(obs.gripper_pose, dtype=np.float32)  # [x,y,z,qx,qy,qz,qw]
-            curr_xyz = pose7[:3]
-            curr_q = quat_normalize(pose7[3:7])
+            delta_xyz = np.clip(delta_xyz, -max_delta_xyz, max_delta_xyz).astype(np.float32)
+            delta_aa = clip_axis_angle(delta_aa, max_delta_angle)
 
             # Compose target pose
             tgt_xyz = (curr_xyz + delta_xyz).astype(np.float32)
@@ -204,7 +267,7 @@ def main():
 
             # Gripper command (Discrete)
             g_prob = 1.0 / (1.0 + np.exp(-float(g_logit)))
-            g_cmd = 1.0 if g_prob >= cfg.gripper_threshold else 0.0
+            g_cmd = 1.0 if g_prob >= gripper_threshold else 0.0
 
             action = np.concatenate([tgt_xyz, tgt_q, np.array([g_cmd], dtype=np.float32)], axis=0).astype(np.float32)
             obs, reward, done = task.step(action)

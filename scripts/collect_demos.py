@@ -124,7 +124,10 @@ def main():
         "img_h": cfg.img_h,
         "num_episodes": cfg.num_episodes,
         "max_steps": cfg.max_steps,
+        "demo_stride": cfg.demo_stride,
         "target_dim": cfg.target_dim,
+        "state_dim": cfg.state_dim,
+        "use_state": cfg.use_state,
         "arm_action_mode": "EndEffectorPoseViaIK",
         "target_type": "delta_to_next_xyz + delta_to_next_axis_angle + gripper_open_next",
     }
@@ -150,15 +153,17 @@ def main():
         ep_dir.mkdir(parents=True, exist_ok=True)
         (ep_dir / "instruction.txt").write_text(instruction)
 
-        if len(demo) < 2:
+        stride = max(int(cfg.demo_stride), 1)
+        if len(demo) <= stride:
             continue
-        T = min(len(demo) - 1, cfg.max_steps)
+        T = min(len(demo) - stride, cfg.max_steps)
         imgs = []
+        states = []
         targets = []
 
         for t in range(T):
             obs_t = demo[t]
-            obs_tp1 = demo[t + 1]
+            obs_tp1 = demo[t + stride]
 
             img = getattr(obs_t, cfg.image_key)
             img = resize_rgb(img, cfg.img_w, cfg.img_h)
@@ -168,9 +173,14 @@ def main():
             next_pose7 = np.array(obs_tp1.gripper_pose, dtype=np.float32)
             curr_xyz = pose7[:3]
             curr_q = quat_normalize(pose7[3:7])
+            curr_open = float(obs_t.gripper_open)
             next_xyz = next_pose7[:3]
             next_q = quat_normalize(next_pose7[3:7])
             next_open = float(obs_tp1.gripper_open)
+
+            if cfg.use_state:
+                state = np.concatenate([pose7, np.array([curr_open], dtype=np.float32)], axis=0)
+                states.append(state.astype(np.float32))
 
             delta_xyz = (next_xyz - curr_xyz).astype(np.float32)
 
@@ -183,6 +193,8 @@ def main():
             targets.append(y)
 
         np.save(ep_dir / "images.npy", np.stack(imgs, axis=0))         # (T,H,W,3) uint8
+        if cfg.use_state:
+            np.save(ep_dir / "states.npy", np.stack(states, axis=0))   # (T,8) float32
         np.save(ep_dir / "targets.npy", np.stack(targets, axis=0))     # (T,7) float32
 
     env.shutdown()

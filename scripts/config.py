@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+
 @dataclass
 class Config:
     work_dir: Path = Path("/rl/rlbench_bc/runs")
@@ -14,8 +15,9 @@ class Config:
     img_w: int = 128
 
     # dataset
-    num_episodes: int = 10          # 先 10 做 smoke test；正式再改回 200
+    num_episodes: int = 10          # set 10 for smoke test; use 200+ for real runs
     max_steps: int = 180
+    demo_stride: int = 1            # use t+stride as target step
 
     # training
     seed: int = 0
@@ -27,6 +29,9 @@ class Config:
     # Supervised target (delta action):
     # delta_xyz (3) + delta_rot_axis_angle (3) + gripper_open (1) => 7 dims
     target_dim: int = 7
+    state_dim: int = 8              # gripper_pose (7) + gripper_open (1)
+    use_state: bool = True
+    normalize_state: bool = True
 
     # action constraints (VERY IMPORTANT)
     # max translation per step (meters)
