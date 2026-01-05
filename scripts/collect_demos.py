@@ -126,7 +126,7 @@ def main():
         "max_steps": cfg.max_steps,
         "target_dim": cfg.target_dim,
         "arm_action_mode": "EndEffectorPoseViaIK",
-        "target_type": "delta_xyz + delta_axis_angle + gripper_open",
+        "target_type": "delta_to_next_xyz + delta_to_next_axis_angle + gripper_open_next",
     }
     (out_root / "meta.json").write_text(json.dumps(meta, indent=2))
 
@@ -150,43 +150,37 @@ def main():
         ep_dir.mkdir(parents=True, exist_ok=True)
         (ep_dir / "instruction.txt").write_text(instruction)
 
-        T = min(len(demo), cfg.max_steps)
+        if len(demo) < 2:
+            continue
+        T = min(len(demo) - 1, cfg.max_steps)
         imgs = []
         targets = []
 
-        prev_pose7 = None
-        prev_open = None
-
         for t in range(T):
             obs_t = demo[t]
+            obs_tp1 = demo[t + 1]
 
             img = getattr(obs_t, cfg.image_key)
             img = resize_rgb(img, cfg.img_w, cfg.img_h)
             imgs.append(img.astype(np.uint8))
 
             pose7 = np.array(obs_t.gripper_pose, dtype=np.float32)  # [x,y,z,qx,qy,qz,qw]
+            next_pose7 = np.array(obs_tp1.gripper_pose, dtype=np.float32)
             curr_xyz = pose7[:3]
             curr_q = quat_normalize(pose7[3:7])
-            curr_open = float(obs_t.gripper_open)
+            next_xyz = next_pose7[:3]
+            next_q = quat_normalize(next_pose7[3:7])
+            next_open = float(obs_tp1.gripper_open)
 
-            if prev_pose7 is None:
-                delta_xyz = np.zeros((3,), dtype=np.float32)
-                delta_aa = np.zeros((3,), dtype=np.float32)
-            else:
-                prev_xyz = prev_pose7[:3]
-                prev_q = quat_normalize(prev_pose7[3:7])
-                delta_xyz = (curr_xyz - prev_xyz).astype(np.float32)
+            delta_xyz = (next_xyz - curr_xyz).astype(np.float32)
 
-                # relative rotation: q_rel = q_curr * inv(q_prev)
-                q_rel = quat_mul(curr_q, quat_inv(prev_q))
-                delta_aa = quat_to_axis_angle(q_rel)
+            # relative rotation: q_rel = q_next * inv(q_curr)
+            q_rel = quat_mul(next_q, quat_inv(curr_q))
+            delta_aa = quat_to_axis_angle(q_rel)
 
-            # target: [dx,dy,dz, ax,ay,az, gripper_open]
-            y = np.concatenate([delta_xyz, delta_aa, np.array([curr_open], dtype=np.float32)], axis=0)
+            # target: [dx,dy,dz, ax,ay,az, gripper_open_next]
+            y = np.concatenate([delta_xyz, delta_aa, np.array([next_open], dtype=np.float32)], axis=0)
             targets.append(y)
-
-            prev_pose7 = pose7
-            prev_open = curr_open
 
         np.save(ep_dir / "images.npy", np.stack(imgs, axis=0))         # (T,H,W,3) uint8
         np.save(ep_dir / "targets.npy", np.stack(targets, axis=0))     # (T,7) float32
