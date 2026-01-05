@@ -183,8 +183,9 @@ def main():
             pred = pred.detach().cpu().numpy().astype(np.float32)
 
             # Parse outputs
-            delta_xyz = pred[:3]
-            delta_aa = pred[3:6]
+            pred_delta = np.tanh(pred[:6]).astype(np.float32)
+            delta_xyz = pred_delta[:3] * cfg.max_delta_xyz
+            delta_aa = pred_delta[3:6] * cfg.max_delta_angle
             g_logit = pred[6]
 
             # Constrain step sizes

@@ -120,11 +120,24 @@ def main():
 
             pred = model(x)  # (B,7)
 
-            pred_delta = pred[:, :6]
+            pred_delta = torch.tanh(pred[:, :6])
             pred_glogit = pred[:, 6:7]
 
-            gt_delta = y[:, :6]
+            gt_delta_xyz = y[:, :3]
+            gt_delta_aa = y[:, 3:6]
             gt_g = y[:, 6:7].clamp(0.0, 1.0)
+
+            gt_delta_xyz = torch.clamp(
+                gt_delta_xyz / cfg.max_delta_xyz, -1.0, 1.0
+            )
+            aa_norm = torch.norm(gt_delta_aa, dim=1, keepdim=True)
+            scale = torch.clamp(cfg.max_delta_angle / (aa_norm + 1e-8), max=1.0)
+            gt_delta_aa = gt_delta_aa * scale
+            gt_delta_aa = torch.clamp(
+                gt_delta_aa / cfg.max_delta_angle, -1.0, 1.0
+            )
+
+            gt_delta = torch.cat([gt_delta_xyz, gt_delta_aa], dim=1)
 
             loss = mse(pred_delta, gt_delta) + 0.2 * bce(pred_glogit, gt_g)
 
