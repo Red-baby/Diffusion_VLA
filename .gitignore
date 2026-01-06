@@ -123,3 +123,8 @@ secrets.*
 # Optional: keep templates (tracked)
 !rlbench_env.sh.template
 !.env.template
+
+########################################
+# Third-party repos (local clones)
+########################################
+third_party/peract/
