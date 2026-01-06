@@ -24,6 +24,7 @@ def main():
 
     ss = [np.load(p, mmap_mode="r") for p in state_paths]
     s = np.concatenate(ss, axis=0).astype(np.float32)
+    print("state shape:", s.shape)
     print("state mean/std:", s.mean(0), s.std(0))
 
 

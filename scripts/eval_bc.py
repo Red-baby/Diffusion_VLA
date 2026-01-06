@@ -30,7 +30,7 @@ def choose_task(name: str):
     raise ValueError("TASK_NAME must be one of: pickupcup / pickandlift / stackblocks")
 
 
-def make_obs_config(image_key: str) -> ObservationConfig:
+def make_obs_config(image_key: str, use_image: bool, use_task_low_dim_state: bool) -> ObservationConfig:
     obs_cfg = ObservationConfig()
     obs_cfg.set_all(False)
 
@@ -47,9 +47,13 @@ def make_obs_config(image_key: str) -> ObservationConfig:
     else:
         raise ValueError(f"Unknown image_key: {image_key}")
 
-    cam.rgb = True
+    if use_image:
+        cam.rgb = True
+
     obs_cfg.gripper_pose = True
     obs_cfg.gripper_open = True
+    if use_task_low_dim_state:
+        obs_cfg.task_low_dim_state = True
     return obs_cfg
 
 
@@ -108,16 +112,24 @@ def clip_axis_angle(aa: np.ndarray, max_angle: float) -> np.ndarray:
 
 
 class DeltaPoseBC(nn.Module):
-    def __init__(self, out_dim: int, state_dim: int, use_state: bool, use_pretrained: bool):
+    def __init__(self, out_dim: int, state_dim: int, use_image: bool, use_state: bool, use_pretrained: bool):
         super().__init__()
+        if not use_image and not use_state:
+            raise ValueError("At least one of use_image/use_state must be True")
+
+        self.use_image = use_image
         self.use_state = use_state
 
-        if use_pretrained:
-            backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-        else:
-            backbone = models.resnet18(weights=None)
-        self.encoder = nn.Sequential(*list(backbone.children())[:-1])
+        img_dim = 0
+        if self.use_image:
+            if use_pretrained:
+                backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+            else:
+                backbone = models.resnet18(weights=None)
+            self.encoder = nn.Sequential(*list(backbone.children())[:-1])
+            img_dim = 512
 
+        state_dim_out = 0
         if self.use_state:
             self.state_mlp = nn.Sequential(
                 nn.Linear(state_dim, 64),
@@ -125,27 +137,34 @@ class DeltaPoseBC(nn.Module):
                 nn.Linear(64, 64),
                 nn.ReLU(inplace=True),
             )
-            head_in = 512 + 64
-        else:
-            head_in = 512
+            state_dim_out = 64
 
+        head_in = img_dim + state_dim_out
         self.head = nn.Sequential(
             nn.Linear(head_in, 256),
             nn.ReLU(inplace=True),
             nn.Linear(256, out_dim),
         )
 
-    def forward(self, x, state=None):
-        img_feat = self.encoder(x)
-        img_feat = torch.flatten(img_feat, 1)
+    def forward(self, x=None, state=None):
+        feats = []
+        if self.use_image:
+            if x is None:
+                raise ValueError("Image input is required when use_image=True")
+            img_feat = self.encoder(x)
+            img_feat = torch.flatten(img_feat, 1)
+            feats.append(img_feat)
 
         if self.use_state:
             if state is None:
                 raise ValueError("State input is required when use_state=True")
             state_feat = self.state_mlp(state)
-            feat = torch.cat([img_feat, state_feat], dim=1)
+            feats.append(state_feat)
+
+        if len(feats) == 1:
+            feat = feats[0]
         else:
-            feat = img_feat
+            feat = torch.cat(feats, dim=1)
 
         return self.head(feat)
 
@@ -164,7 +183,9 @@ def main():
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     ckpt_cfg = ckpt.get("cfg", {})
     target_dim = int(ckpt_cfg.get("target_dim", cfg.target_dim))
+    use_image = bool(ckpt_cfg.get("use_image", cfg.use_image))
     use_state = bool(ckpt_cfg.get("use_state", cfg.use_state))
+    use_task_low_dim_state = bool(ckpt_cfg.get("use_task_low_dim_state", cfg.use_task_low_dim_state))
     state_dim = int(ckpt_cfg.get("state_dim", cfg.state_dim))
     normalize_state = bool(ckpt_cfg.get("normalize_state", cfg.normalize_state))
     demo_stride = max(int(ckpt_cfg.get("demo_stride", cfg.demo_stride)), 1)
@@ -188,6 +209,7 @@ def main():
     model = DeltaPoseBC(
         out_dim=target_dim,
         state_dim=state_dim,
+        use_image=use_image,
         use_state=use_state,
         use_pretrained=cfg.use_pretrained,
     )
@@ -195,17 +217,19 @@ def main():
     model.to(device)
     model.eval()
 
-    tf = T.Compose([
-        T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225]),
-    ])
+    tf = None
+    if use_image:
+        tf = T.Compose([
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225]),
+        ])
 
     action_mode = ActionMode(
         arm_action_mode=EndEffectorPoseViaIK(),
         gripper_action_mode=Discrete()
     )
-    obs_config = make_obs_config(image_key)
+    obs_config = make_obs_config(image_key, use_image, use_task_low_dim_state)
 
     env = Environment(action_mode, obs_config=obs_config, headless=cfg.headless)
     env.launch()
@@ -222,12 +246,14 @@ def main():
         done = False
 
         for _t in range(cfg.max_steps):
-            img = getattr(obs, image_key)
-            img = resize_rgb(img, img_w, img_h)
-            if cfg.occlusion:
-                img = occlude_center(img, cfg.occ_half)
-
-            x = tf(img).unsqueeze(0).to(device, non_blocking=True)
+            if use_image:
+                img = getattr(obs, image_key)
+                img = resize_rgb(img, img_w, img_h)
+                if cfg.occlusion:
+                    img = occlude_center(img, cfg.occ_half)
+                x = tf(img).unsqueeze(0).to(device, non_blocking=True)
+            else:
+                x = None
 
             pose7 = np.array(obs.gripper_pose, dtype=np.float32)  # [x,y,z,qx,qy,qz,qw]
             curr_xyz = pose7[:3]
@@ -235,7 +261,16 @@ def main():
 
             if use_state:
                 curr_open = float(obs.gripper_open)
-                state = np.concatenate([pose7, np.array([curr_open], dtype=np.float32)], axis=0)
+                state_parts = [pose7, np.array([curr_open], dtype=np.float32)]
+                if use_task_low_dim_state:
+                    low_dim = getattr(obs, "task_low_dim_state", None)
+                    if low_dim is None:
+                        raise RuntimeError("task_low_dim_state is missing from observation.")
+                    low_dim = np.array(low_dim, dtype=np.float32).reshape(-1)
+                    if low_dim.size == 0:
+                        raise RuntimeError("task_low_dim_state is empty.")
+                    state_parts.append(low_dim)
+                state = np.concatenate(state_parts, axis=0).astype(np.float32)
                 if state_mean is not None:
                     state = (state - state_mean) / state_std
                 s = torch.from_numpy(state).unsqueeze(0).to(device, non_blocking=True)

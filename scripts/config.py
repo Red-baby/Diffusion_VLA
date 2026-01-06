@@ -29,9 +29,12 @@ class Config:
     # Supervised target (delta action):
     # delta_xyz (3) + delta_rot_axis_angle (3) + gripper_open (1) => 7 dims
     target_dim: int = 7
-    state_dim: int = 8              # gripper_pose (7) + gripper_open (1)
+    use_image: bool = True
     use_state: bool = True
+    use_task_low_dim_state: bool = True
     normalize_state: bool = True
+    state_dim: int = 0              # inferred from data when use_state=True
+    state_noise_std: float = 0.0    # optional noise for robustness
 
     # action constraints (VERY IMPORTANT)
     # max translation per step (meters)
