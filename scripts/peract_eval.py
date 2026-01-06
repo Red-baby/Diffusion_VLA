@@ -1,10 +1,13 @@
 import argparse
 import os
+import shutil
+import ssl
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
-from urllib.request import urlretrieve
+from typing import Optional
+from urllib.request import urlopen
 
 
 PERACT_REPO_URL = "https://github.com/peract/peract.git"
@@ -66,15 +69,30 @@ def _ensure_peract_repo(peract_root: Path, clone: bool):
     subprocess.run(["git", "clone", "--depth", "1", PERACT_REPO_URL, str(peract_root)], check=True)
 
 
-def _ensure_checkpoint(peract_root: Path, ckpt_url: str):
+def _download_file(url: str, dest: Path, insecure: bool, ca_bundle: Optional[Path]):
+    if ca_bundle is not None:
+        context = ssl.create_default_context(cafile=str(ca_bundle))
+    elif insecure:
+        context = ssl._create_unverified_context()
+    else:
+        context = ssl.create_default_context()
+    with urlopen(url, context=context) as resp, open(dest, "wb") as f:
+        shutil.copyfileobj(resp, f)
+
+
+def _extract_zip(zip_path: Path, peract_root: Path):
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(peract_root)
+
+
+def _ensure_checkpoint(peract_root: Path, ckpt_url: str, insecure: bool, ca_bundle: Optional[Path]):
     ckpt_cfg = peract_root / "ckpts" / "multi" / "PERACT_BC" / "seed0" / "config.yaml"
     if ckpt_cfg.exists():
         return ckpt_cfg
     peract_root.mkdir(parents=True, exist_ok=True)
     zip_path = peract_root / "peract_600k.zip"
-    urlretrieve(ckpt_url, zip_path)
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(peract_root)
+    _download_file(ckpt_url, zip_path, insecure, ca_bundle)
+    _extract_zip(zip_path, peract_root)
     zip_path.unlink(missing_ok=True)
     if not ckpt_cfg.exists():
         raise RuntimeError("Checkpoint unzip succeeded but config.yaml is missing.")
@@ -130,6 +148,9 @@ def main():
     parser.add_argument("--clone", action="store_true", help="Clone PerAct repo if missing.")
     parser.add_argument("--download-ckpt", action="store_true", help="Download PerAct checkpoint if missing.")
     parser.add_argument("--ckpt-url", type=str, default=PERACT_CKPT_URL)
+    parser.add_argument("--ckpt-zip", type=Path, default=None, help="Use a local peract_600k.zip instead of downloading.")
+    parser.add_argument("--insecure", action="store_true", help="Disable SSL cert verification for checkpoint download.")
+    parser.add_argument("--ca-bundle", type=Path, default=None, help="Custom CA bundle for SSL verification.")
     parser.add_argument("--no-occlude", action="store_true", help="Disable occlusion patch.")
     parser.add_argument("--occ-mode", type=str, default="center", choices=("center", "random"))
     parser.add_argument("--occ-half", type=int, default=32)
@@ -146,8 +167,15 @@ def main():
     _ensure_peract_repo(peract_root, args.clone)
 
     ckpt_cfg = None
-    if args.download_ckpt:
-        ckpt_cfg = _ensure_checkpoint(peract_root, args.ckpt_url)
+    if args.ckpt_zip is not None:
+        if not args.ckpt_zip.exists():
+            raise RuntimeError(f"ckpt-zip not found: {args.ckpt_zip}")
+        _extract_zip(args.ckpt_zip, peract_root)
+        ckpt_cfg = peract_root / "ckpts" / "multi" / "PERACT_BC" / "seed0" / "config.yaml"
+        if not ckpt_cfg.exists():
+            raise RuntimeError("Checkpoint unzip succeeded but config.yaml is missing.")
+    elif args.download_ckpt:
+        ckpt_cfg = _ensure_checkpoint(peract_root, args.ckpt_url, args.insecure, args.ca_bundle)
     else:
         ckpt_cfg = peract_root / "ckpts" / "multi" / "PERACT_BC" / "seed0" / "config.yaml"
         if not ckpt_cfg.exists():
